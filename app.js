@@ -25,6 +25,17 @@ function gauss(x, mu, sigma) {
   if (sigma < 1) sigma = 1;
   return Math.exp(-0.5 * Math.pow((x - mu)/sigma, 2)) / (sigma * Math.sqrt(2 * Math.PI));
 }
+function median(arr) {
+  if (!arr.length) return null;
+  const s = [...arr].sort((a,b)=>a-b);
+  const m = Math.floor(s.length/2);
+  return s.length % 2 ? s[m] : (s[m-1]+s[m])/2;
+}
+function mad(arr, med) {
+  if (!arr.length) return 0;
+  const dev = arr.map(x => Math.abs(x - med));
+  return median(dev) * 1.4826; // scale to ~σ for normal dist
+}
 
 /* --- data store --- */
 let DATA = null;
@@ -58,27 +69,53 @@ function getStats() {
   const sigma = Math.sqrt(variance) || 2;
   const last = cycles[cycles.length-1];
 
-  // luteal phase length, estimated from mucus → next period
-  // egg-white mucus = ~1-2 days before ovulation; luteal phase = ovulation → next period (typically 12-14d)
-  // we measure "days from mucus to next period" as a proxy and subtract ~1.5 to estimate ovulation→period
+  // Luteal phase length, estimated from mucus → next period.
+  // Egg-white mucus = ~1-2 days before ovulation; luteal phase = ovulation → next period.
+  // ROBUST: use median + MAD instead of mean/stdev so a single anovulatory or atypical
+  // mucus observation (extreem vroege/late slijm) does not derail the estimate.
   const mucus = [...(DATA.mucus||[])].sort((a,b)=> a.date.localeCompare(b.date));
-  const mucusGaps = [];
-  for (const m of mucus) {
-    const md = parseISO(m.date);
+  const mucusEntries = []; // { date, gap, isOutlier, reason }
+  for (const mEntry of mucus) {
+    const md = parseISO(mEntry.date);
     const nextCycle = cycles.find(c => parseISO(c.start) > md);
     if (nextCycle) {
-      mucusGaps.push(daysBetween(md, parseISO(nextCycle.start)));
+      mucusEntries.push({
+        date: mEntry.date, note: mEntry.note,
+        gap: daysBetween(md, parseISO(nextCycle.start)),
+        isOutlier: false, reason: ""
+      });
+    } else {
+      mucusEntries.push({ date: mEntry.date, note: mEntry.note, gap: null, isOutlier: false, reason: "geen volgende cyclus geregistreerd" });
     }
   }
-  const lutealEstimate = mucusGaps.length
-    ? (mucusGaps.reduce((a,b)=>a+b,0)/mucusGaps.length) - 1.5
-    : 14;
-  const lutealSigma = mucusGaps.length > 1
-    ? Math.sqrt(mucusGaps.reduce((a,b)=>a+Math.pow(b - (mucusGaps.reduce((x,y)=>x+y,0)/mucusGaps.length),2),0)/(mucusGaps.length-1))
-    : 2;
+  const gaps = mucusEntries.filter(x => x.gap != null).map(x => x.gap);
+
+  const med = median(gaps);
+  const robustSpread = mad(gaps, med ?? 0);
+  // outlier window: medisch plausibele luteale fase ligt tussen 9 en 17 dagen,
+  // dus mucus→menstruatie tussen ~10 en ~19 dagen. Buiten die range = atypisch.
+  // Gebruik 3*MAD met een vloer van 3 dagen, plus harde medische grenzen.
+  const tol = Math.max(3 * robustSpread, 3);
+  mucusEntries.forEach(e => {
+    if (e.gap == null) return;
+    const tooFarFromMedian = med != null && Math.abs(e.gap - med) > tol;
+    const outsideMedicalRange = e.gap < 8 || e.gap > 20;
+    if (tooFarFromMedian || outsideMedicalRange) {
+      e.isOutlier = true;
+      if (outsideMedicalRange && e.gap > 20) e.reason = "atypisch vroeg in cyclus — mogelijk anovulatoir of dubbele follikel-recruitment";
+      else if (outsideMedicalRange && e.gap < 8) e.reason = "atypisch laat in cyclus — mogelijk late ovulatie of verschoven cyclus";
+      else e.reason = `wijkt >${tol.toFixed(1)}d af van mediaan (${med.toFixed(1)}d)`;
+    }
+  });
+
+  const cleanGaps = mucusEntries.filter(x => x.gap != null && !x.isOutlier).map(x => x.gap);
+  const usedMedian = cleanGaps.length ? median(cleanGaps) : (med ?? 15.5);
+  const lutealEstimate = usedMedian - 1.5; // subtract ~1.5d to go from mucus→menstruation to ovulation→menstruation
+  const lutealSigma = cleanGaps.length > 1 ? Math.max(mad(cleanGaps, usedMedian), 1) : 2;
 
   return { cycles, lengths, mean, sigma, lastStart: last ? parseISO(last.start) : null,
-           mucus, mucusGaps, lutealEstimate, lutealSigma };
+           mucus, mucusEntries, mucusGaps: gaps, mucusGapsClean: cleanGaps,
+           lutealEstimate, lutealSigma, lutealMedian: usedMedian };
 }
 
 function predictNextStart(stats=null) {
@@ -234,16 +271,26 @@ function renderOverview() {
 
   // ovulation analysis text
   const ov = $("#ovulationStats");
-  if (stats.mucusGaps.length) {
-    const gaps = stats.mucusGaps;
-    const meanGap = gaps.reduce((a,b)=>a+b,0)/gaps.length;
-    ov.innerHTML = `
-      Op basis van <strong>${gaps.length}</strong> waarneming(en) van heldere slijm:
-      <br>• gemiddeld <strong>${meanGap.toFixed(1)} dagen</strong> tussen slijm en volgende menstruatie (spreiding ${Math.min(...gaps)}–${Math.max(...gaps)}d)
-      <br>• geschatte <strong>luteale fase ≈ ${stats.lutealEstimate.toFixed(1)} dagen</strong> (σ ${stats.lutealSigma.toFixed(1)})
+  const allGaps = stats.mucusGaps;
+  const cleanGaps = stats.mucusGapsClean;
+  const outliers = stats.mucusEntries.filter(e => e.isOutlier);
+  if (allGaps.length) {
+    let html = `
+      Op basis van <strong>${cleanGaps.length}/${allGaps.length}</strong> betrouwbare slijm-waarneming(en) (outliers gefilterd):
+      <br>• <strong>mediaan ${stats.lutealMedian.toFixed(1)}d</strong> tussen slijm en volgende menstruatie (MAD ${stats.lutealSigma.toFixed(1)}d)
+      <br>• geschatte <strong>luteale fase ≈ ${stats.lutealEstimate.toFixed(1)} dagen</strong>
       <br>• geschatte ovulatie rond cyclusdag <strong>${ovulDay}</strong> van ${total}
-      <br>• 💧 heldere slijm = einde folliculaire fase / start vruchtbaar venster — ovulatie volgt ~1-2 dagen later.
+      <br>• 💧 heldere slijm = einde folliculaire fase / start vruchtbaar venster — echte ovulatie volgt ~1-2 dagen later.
     `;
+    if (outliers.length) {
+      html += `<br><br>⚠️ <strong>${outliers.length} atypische waarneming(en):</strong><ul style="margin:.3rem 0 0 1rem;padding:0">`;
+      outliers.forEach(o => {
+        html += `<li>${fmt(parseISO(o.date))} (gap ${o.gap}d) — ${o.reason}</li>`;
+      });
+      html += `</ul><span class="muted">Deze worden niet in het luteale gemiddelde meegenomen om de voorspelling stabiel te houden. Mogelijke verklaringen: anovulatoire estrogeen-doorbraak, dubbele follikel-recruitment, hormoonschommeling (T-therapie, stress, ziekte), of een niet-hormonale oorzaak (infectie, lubricant). Volg of de volgende menstruatie op de verwachte datum komt — als die ook vroeg/laat is, is het waarschijnlijk een echte cyclusverschuiving en moet de mediaan opnieuw geëvalueerd worden.</span>`;
+    }
+    html += `<br><br><span class="muted"><strong>Effect op menstruatie-voorspelling:</strong> verwaarloosbaar. De volgende-bloedings­datum wordt berekend uit menstruatie-tot-menstruatie intervallen, niet uit slijm. Slijm bepaalt alleen ovulatie-/fase-timing op de kalender.</span>`;
+    ov.innerHTML = html;
   } else {
     ov.textContent = "Nog geen heldere-slijm data ingevoerd. Voeg waarnemingen toe in de dokter-tab om ovulatie te kalibreren.";
   }
@@ -425,20 +472,19 @@ function renderCharts() {
   // ovulation timing chart: bar of "days from mucus → next menstruation" per observation
   const ovLabels = [];
   const ovData = [];
-  const mucus = [...(DATA.mucus||[])].sort((a,b)=> a.date.localeCompare(b.date));
-  for (const mEntry of mucus) {
-    const md = parseISO(mEntry.date);
-    const nextCycle = stats.cycles.find(c => parseISO(c.start) > md);
-    if (nextCycle) {
-      ovLabels.push(fmt(md));
-      ovData.push(daysBetween(md, parseISO(nextCycle.start)));
-    }
+  const ovColors = [];
+  for (const e of stats.mucusEntries) {
+    if (e.gap == null) continue;
+    ovLabels.push(fmt(parseISO(e.date)));
+    ovData.push(e.gap);
+    ovColors.push(e.isOutlier ? "#ffb86b" : "#5af0ff");
   }
+  const medLine = ovData.map(()=> stats.lutealMedian);
   charts.ovul = new Chart($("#chartOvul"), {
     type: "bar",
     data: { labels: ovLabels, datasets: [
-      { label: "dagen heldere slijm → menstruatie", data: ovData, backgroundColor: "#5af0ff", borderColor: "#00d4ff", borderWidth: 1 },
-      { label: "gemiddelde", data: ovData.map(()=> ovData.length ? ovData.reduce((a,b)=>a+b,0)/ovData.length : 0), type: "line", borderColor: "#ffb703", borderDash: [5,5], pointRadius: 0 }
+      { label: "dagen heldere slijm → menstruatie", data: ovData, backgroundColor: ovColors, borderColor: "#00d4ff", borderWidth: 1 },
+      { label: "mediaan (robuust)", data: medLine, type: "line", borderColor: "#ffb703", borderDash: [5,5], pointRadius: 0 }
     ]},
     options: { plugins: { legend: { labels: { color: CHART_COLORS.ink } } },
       scales: {
@@ -468,14 +514,16 @@ function renderMucusTable() {
   const tb = $("#mucusTable tbody");
   tb.innerHTML = "";
   const stats = getStats();
+  const byDate = Object.fromEntries(stats.mucusEntries.map(e => [e.date, e]));
   const mucus = [...(DATA.mucus||[])].sort((a,b)=> a.date.localeCompare(b.date));
   mucus.forEach(mItem => {
     const md = parseISO(mItem.date);
-    // dag in cyclus: dagen sinds laatste cyclus-start vóór deze datum
     const prevCycle = [...stats.cycles].reverse().find(c => parseISO(c.start) <= md);
     const cd = prevCycle ? daysBetween(parseISO(prevCycle.start), md) + 1 : "—";
+    const entry = byDate[mItem.date];
+    const flag = entry?.isOutlier ? ` <span style="color:#ffb86b" title="${escapeHtml(entry.reason)}">⚠️ outlier</span>` : "";
     const tr = document.createElement("tr");
-    tr.innerHTML = `<td>${fmt(md)}</td><td>${cd !== "—" ? "dag "+cd : "—"}</td><td>${escapeHtml(mItem.note||"")}</td><td><button class="row-del">✕</button></td>`;
+    tr.innerHTML = `<td>${fmt(md)}${flag}</td><td>${cd !== "—" ? "dag "+cd : "—"}</td><td>${escapeHtml(mItem.note||"")}</td><td><button class="row-del">✕</button></td>`;
     tr.querySelector(".row-del").addEventListener("click", ()=> {
       DATA.mucus = DATA.mucus.filter(x => x.date !== mItem.date);
       persist(); render();
