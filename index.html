@@ -1,0 +1,175 @@
+<!doctype html>
+<html lang="nl">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>perioid — cyclus tracker</title>
+<link rel="stylesheet" href="styles.css" />
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Ctext y='52' font-size='52'%3E%F0%9F%8C%B8%3C/text%3E%3C/svg%3E" />
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+</head>
+<body>
+
+<div id="gate" class="gate">
+  <div class="gate-card">
+    <div class="logo">perioid</div>
+    <div class="tag">cyclus tracker &amp; voorspeller</div>
+    <form id="pwForm">
+      <input id="pw" type="password" autocomplete="current-password" placeholder="wachtwoord" autofocus />
+      <button type="submit">openen</button>
+    </form>
+    <div id="pwErr" class="err"></div>
+  </div>
+</div>
+
+<div id="app" class="app hidden">
+  <header>
+    <div class="brand">perioid <span class="muted">— <span id="patientName">…</span></span></div>
+    <nav>
+      <button data-tab="overview" class="tab active">overzicht</button>
+      <button data-tab="calendar" class="tab">kalender</button>
+      <button data-tab="charts" class="tab">grafieken</button>
+      <button data-tab="doctor" class="tab">dokter invoer</button>
+      <button data-tab="data" class="tab">data</button>
+      <button id="logout" class="ghost">vergrendel</button>
+    </nav>
+  </header>
+
+  <main>
+
+    <section id="tab-overview" class="tab-panel active">
+      <div class="cards">
+        <div class="card hero">
+          <div class="card-label">volgende menstruatie</div>
+          <div class="card-big" id="nextDate">—</div>
+          <div class="card-sub" id="nextRange">—</div>
+        </div>
+        <div class="card">
+          <div class="card-label">dagen tot</div>
+          <div class="card-big" id="daysUntil">—</div>
+          <div class="card-sub" id="daysUntilSub">—</div>
+        </div>
+        <div class="card">
+          <div class="card-label">gem. cyclus</div>
+          <div class="card-big" id="avgCycle">—</div>
+          <div class="card-sub" id="avgCycleSub">σ —</div>
+        </div>
+        <div class="card">
+          <div class="card-label">huidige fase</div>
+          <div class="card-big small" id="currentPhase">—</div>
+          <div class="card-sub" id="phaseDay">—</div>
+        </div>
+      </div>
+
+      <div class="phase-strip" id="phaseStrip"></div>
+
+      <div class="next-phases card-wide">
+        <h3>komende fases</h3>
+        <table id="phaseTable">
+          <thead><tr><th>fase</th><th>verwachte datum</th><th>dag in cyclus</th></tr></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </section>
+
+    <section id="tab-calendar" class="tab-panel">
+      <div class="cal-head">
+        <button id="calPrev">‹</button>
+        <h2 id="calTitle">—</h2>
+        <button id="calNext">›</button>
+        <button id="calToday" class="ghost">vandaag</button>
+      </div>
+      <div class="legend">
+        <span><span class="sw lgd-menstruation"></span> menstruatie</span>
+        <span><span class="sw lgd-follicular"></span> folliculair</span>
+        <span><span class="sw lgd-ovulation"></span> ovulatie / vruchtbaar</span>
+        <span><span class="sw lgd-luteal"></span> luteaal</span>
+        <span><span class="sw lgd-today"></span> vandaag</span>
+      </div>
+      <div class="cal-grid-head">
+        <div>ma</div><div>di</div><div>wo</div><div>do</div><div>vr</div><div>za</div><div>zo</div>
+      </div>
+      <div id="calGrid" class="cal-grid"></div>
+    </section>
+
+    <section id="tab-charts" class="tab-panel">
+      <div class="chart-wrap">
+        <h3>cycluslengte per maand</h3>
+        <canvas id="chartLen"></canvas>
+      </div>
+      <div class="chart-wrap">
+        <h3>verdeling cycluslengtes</h3>
+        <canvas id="chartHist"></canvas>
+      </div>
+      <div class="chart-wrap">
+        <h3>kans op menstruatie per dag (komende 60 dagen)</h3>
+        <canvas id="chartProb"></canvas>
+      </div>
+    </section>
+
+    <section id="tab-doctor" class="tab-panel">
+      <div class="two-col">
+        <div class="card-wide">
+          <h3>nieuwe cyclus toevoegen</h3>
+          <form id="addCycleForm" class="form">
+            <label>start menstruatie
+              <input type="date" id="cycleDate" required />
+            </label>
+            <label>notitie (optioneel)
+              <input type="text" id="cycleNote" placeholder="bv. om 23:45, lichte pijn…" />
+            </label>
+            <button type="submit">toevoegen</button>
+          </form>
+          <h4>geregistreerde cycli</h4>
+          <table id="cyclesTable">
+            <thead><tr><th>start</th><th>lengte</th><th>notitie</th><th></th></tr></thead>
+            <tbody></tbody>
+          </table>
+        </div>
+
+        <div class="card-wide">
+          <h3>medische notitie (dokter)</h3>
+          <form id="docForm" class="form">
+            <label>datum
+              <input type="date" id="docDate" required />
+            </label>
+            <label>type
+              <select id="docType">
+                <option value="observation">observatie</option>
+                <option value="symptom">symptoom</option>
+                <option value="medication">medicatie</option>
+                <option value="correction">correctie voorspelling</option>
+              </select>
+            </label>
+            <label>tekst
+              <textarea id="docText" rows="3" required></textarea>
+            </label>
+            <button type="submit">opslaan</button>
+          </form>
+          <h4>geschiedenis</h4>
+          <ul id="docList" class="doc-list"></ul>
+        </div>
+      </div>
+    </section>
+
+    <section id="tab-data" class="tab-panel">
+      <div class="card-wide">
+        <h3>data &amp; export</h3>
+        <p class="muted">Alle wijzigingen worden lokaal in je browser opgeslagen. Om ze permanent te maken in de repo, exporteer als JSON en commit naar <code>data.json</code>.</p>
+        <div class="btn-row">
+          <button id="exportBtn">exporteer JSON</button>
+          <button id="importBtn">importeer JSON</button>
+          <input type="file" id="importFile" accept="application/json" hidden />
+          <button id="resetBtn" class="danger">reset naar repo data</button>
+        </div>
+        <pre id="dataPreview"></pre>
+      </div>
+    </section>
+
+  </main>
+  <footer><span class="muted">perioid · lokale opslag · wachtwoord beschermd · v1</span></footer>
+</div>
+
+<script src="app.js"></script>
+</body>
+</html>

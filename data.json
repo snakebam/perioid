@@ -1,0 +1,15 @@
+{
+  "patient": {
+    "name": "Mmieba",
+    "notes": ""
+  },
+  "cycles": [
+    { "start": "2025-12-20", "lengthFromPrev": null, "note": "~30 dagen geschat" },
+    { "start": "2026-01-16", "lengthFromPrev": 28, "note": "" },
+    { "start": "2026-02-12", "lengthFromPrev": 27, "note": "om 23:45" },
+    { "start": "2026-03-15", "lengthFromPrev": 32, "note": "" },
+    { "start": "2026-04-11", "lengthFromPrev": 28, "note": "" },
+    { "start": "2026-05-09", "lengthFromPrev": 29, "note": "correctie volgende: 30-5-2026" }
+  ],
+  "doctorEntries": []
+}
