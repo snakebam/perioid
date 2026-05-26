@@ -4,12 +4,18 @@
     "notes": ""
   },
   "cycles": [
-    { "start": "2025-12-20", "lengthFromPrev": null, "note": "~30 dagen geschat" },
-    { "start": "2026-01-16", "lengthFromPrev": 28, "note": "" },
-    { "start": "2026-02-12", "lengthFromPrev": 27, "note": "om 23:45" },
-    { "start": "2026-03-15", "lengthFromPrev": 32, "note": "" },
-    { "start": "2026-04-11", "lengthFromPrev": 28, "note": "" },
-    { "start": "2026-05-09", "lengthFromPrev": 29, "note": "correctie volgende: 30-5-2026" }
+    { "start": "2025-12-20", "note": "" },
+    { "start": "2026-01-16", "note": "" },
+    { "start": "2026-02-12", "note": "" },
+    { "start": "2026-03-15", "note": "" },
+    { "start": "2026-04-11", "note": "" },
+    { "start": "2026-05-09", "note": "" }
+  ],
+  "mucus": [
+    { "date": "2026-02-01", "note": "heldere slijm" },
+    { "date": "2026-02-28", "note": "heldere slijm" },
+    { "date": "2026-03-31", "note": "heldere slijm" },
+    { "date": "2026-04-27", "note": "heldere slijm" }
   ],
   "doctorEntries": []
 }

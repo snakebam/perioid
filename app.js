@@ -1,21 +1,10 @@
-/* perioid — cycle tracker
+/* perioid — cycle tracker 💪
    client-side only, password gate (mmiebaperiod), localStorage persistence.
 */
 
 const PASSWORD = "mmiebaperiod";
-const STORAGE_KEY = "perioid.data.v1";
+const STORAGE_KEY = "perioid.data.v2";
 const SESSION_KEY = "perioid.session";
-
-const PHASES = [
-  { key: "menstruation", label: "menstruatie", start: 1,  end: 5,  color: "#ff4d6d" },
-  { key: "follicular",   label: "folliculair", start: 6,  end: 12, color: "#8ad7ff" },
-  { key: "fertile",      label: "vruchtbaar",  start: 13, end: 13, color: "#ffd166" },
-  { key: "ovulation",    label: "ovulatie",    start: 14, end: 14, color: "#ffb703" },
-  { key: "fertile2",     label: "vruchtbaar",  start: 15, end: 16, color: "#ffd166" },
-  { key: "implantation", label: "innesteling", start: 17, end: 17, color: "#e2a4ff" },
-  { key: "early-luteal", label: "vroege luteaal", start: 17, end: 23, color: "#c89cff" },
-  { key: "late-luteal",  label: "late luteaal",   start: 24, end: 28, color: "#a26bff" },
-];
 
 /* --- utils --- */
 const $ = (q, el=document) => el.querySelector(q);
@@ -23,13 +12,15 @@ const $$ = (q, el=document) => [...el.querySelectorAll(q)];
 const fmt = d => d.toLocaleDateString("nl-NL", { day: "2-digit", month: "short", year: "numeric" });
 const fmtLong = d => d.toLocaleDateString("nl-NL", { weekday: "long", day: "numeric", month: "long", year: "numeric" });
 const fmtMonth = d => d.toLocaleDateString("nl-NL", { month: "long", year: "numeric" });
-const toISO = d => d.toISOString().slice(0,10);
+const toISO = d => {
+  const y = d.getFullYear(), m = String(d.getMonth()+1).padStart(2,"0"), dd = String(d.getDate()).padStart(2,"0");
+  return `${y}-${m}-${dd}`;
+};
 const parseISO = s => { const [y,m,dd] = s.split("-").map(Number); return new Date(y, m-1, dd); };
-const daysBetween = (a, b) => Math.round((b - a) / 86400000);
+const daysBetween = (a, b) => Math.round((startOfDay(b) - startOfDay(a)) / 86400000);
 const addDays = (d, n) => { const r = new Date(d); r.setDate(r.getDate()+n); return r; };
 const startOfDay = d => { const r = new Date(d); r.setHours(0,0,0,0); return r; };
 
-/* gaussian pdf for menstruation probability */
 function gauss(x, mu, sigma) {
   if (sigma < 1) sigma = 1;
   return Math.exp(-0.5 * Math.pow((x - mu)/sigma, 2)) / (sigma * Math.sqrt(2 * Math.PI));
@@ -43,16 +34,17 @@ async function loadInitial() {
   try {
     const r = await fetch("data.json", { cache: "no-store" });
     repoData = await r.json();
-  } catch { repoData = { patient: { name: "—" }, cycles: [], doctorEntries: [] }; }
+  } catch { repoData = { patient: { name: "—" }, cycles: [], mucus: [], doctorEntries: [] }; }
   const local = localStorage.getItem(STORAGE_KEY);
   DATA = local ? JSON.parse(local) : structuredClone(repoData);
+  if (!DATA.mucus) DATA.mucus = [];
+  if (!DATA.doctorEntries) DATA.doctorEntries = [];
 }
 function persist() { localStorage.setItem(STORAGE_KEY, JSON.stringify(DATA)); }
 
 /* --- predictions --- */
 function getStats() {
   const cycles = [...DATA.cycles].sort((a,b)=> a.start.localeCompare(b.start));
-  // recompute lengthFromPrev from dates
   const lengths = [];
   for (let i = 1; i < cycles.length; i++) {
     lengths.push(daysBetween(parseISO(cycles[i-1].start), parseISO(cycles[i].start)));
@@ -65,19 +57,41 @@ function getStats() {
     : 4;
   const sigma = Math.sqrt(variance) || 2;
   const last = cycles[cycles.length-1];
-  return { cycles, lengths, mean, sigma, lastStart: last ? parseISO(last.start) : null };
+
+  // luteal phase length, estimated from mucus → next period
+  // egg-white mucus = ~1-2 days before ovulation; luteal phase = ovulation → next period (typically 12-14d)
+  // we measure "days from mucus to next period" as a proxy and subtract ~1.5 to estimate ovulation→period
+  const mucus = [...(DATA.mucus||[])].sort((a,b)=> a.date.localeCompare(b.date));
+  const mucusGaps = [];
+  for (const m of mucus) {
+    const md = parseISO(m.date);
+    const nextCycle = cycles.find(c => parseISO(c.start) > md);
+    if (nextCycle) {
+      mucusGaps.push(daysBetween(md, parseISO(nextCycle.start)));
+    }
+  }
+  const lutealEstimate = mucusGaps.length
+    ? (mucusGaps.reduce((a,b)=>a+b,0)/mucusGaps.length) - 1.5
+    : 14;
+  const lutealSigma = mucusGaps.length > 1
+    ? Math.sqrt(mucusGaps.reduce((a,b)=>a+Math.pow(b - (mucusGaps.reduce((x,y)=>x+y,0)/mucusGaps.length),2),0)/(mucusGaps.length-1))
+    : 2;
+
+  return { cycles, lengths, mean, sigma, lastStart: last ? parseISO(last.start) : null,
+           mucus, mucusGaps, lutealEstimate, lutealSigma };
 }
 
-function predictNextStart() {
-  const s = getStats();
+function predictNextStart(stats=null) {
+  const s = stats || getStats();
   if (!s.lastStart) return null;
   return addDays(s.lastStart, Math.round(s.mean));
 }
 
-/* probability density of menstruation starting on each day (sum of gaussians for next ~3 cycles) */
+/* probability density of menstruation starting on each day (sum over future cycles) */
 function menstruationProb(date, stats) {
   if (!stats.lastStart) return 0;
   const dayIdx = daysBetween(stats.lastStart, date);
+  if (dayIdx < 1) return 0;
   let p = 0;
   for (let k = 1; k <= 4; k++) {
     p += gauss(dayIdx, stats.mean * k, stats.sigma * Math.sqrt(k));
@@ -89,19 +103,22 @@ function cycleDayFor(date, stats) {
   if (!stats.lastStart) return null;
   const diff = daysBetween(stats.lastStart, date);
   if (diff < 0) return null;
-  // map day into current predicted cycle
   return (diff % Math.round(stats.mean)) + 1;
 }
 
-function phaseFor(cycleDay) {
+function phaseFor(cycleDay, stats) {
   if (cycleDay == null) return null;
-  // priority: menstruation > ovulation > fertile > luteal > follicular
-  if (cycleDay >= 1 && cycleDay <= 5)  return { key: "menstruation", label: "menstruatie", color: "#ff4d6d" };
-  if (cycleDay === 14)                 return { key: "ovulation",    label: "ovulatie",    color: "#ffb703" };
-  if (cycleDay >= 12 && cycleDay <= 16)return { key: "fertile",      label: "vruchtbaar",  color: "#ffd166" };
-  if (cycleDay >= 17 && cycleDay <= 23)return { key: "early-luteal", label: "vroege luteaal", color: "#c89cff" };
-  if (cycleDay >= 24)                  return { key: "late-luteal",  label: "late luteaal",   color: "#a26bff" };
-  return { key: "follicular", label: "folliculair", color: "#8ad7ff" };
+  const total = Math.round(stats.mean);
+  const luteal = Math.round(stats.lutealEstimate);
+  const ovulDay = total - luteal; // estimated ovulation day in cycle
+  const fertileStart = ovulDay - 4;
+  const fertileEnd = ovulDay + 1;
+
+  if (cycleDay >= 1 && cycleDay <= 5) return { key: "menstruation", label: "menstruatie 🩸", color: "#ff4d6d" };
+  if (cycleDay === ovulDay)            return { key: "ovulation",   label: "ovulatie ⚡",     color: "#ffb703" };
+  if (cycleDay >= fertileStart && cycleDay <= fertileEnd) return { key: "fertile", label: "vruchtbaar 💧", color: "#ffd166" };
+  if (cycleDay > ovulDay)              return { key: "luteal",      label: "luteaal 🔵",      color: "#2b7fff" };
+  return { key: "follicular", label: "folliculair 🔷", color: "#00d4ff" };
 }
 
 /* --- gate --- */
@@ -143,41 +160,42 @@ $$(".tab").forEach(b => b.addEventListener("click", () => {
 function renderOverview() {
   const stats = getStats();
   $("#patientName").textContent = DATA.patient?.name || "—";
-  const next = predictNextStart();
+  const next = predictNextStart(stats);
   if (next) {
     $("#nextDate").textContent = fmtLong(next);
     const lo = addDays(next, -Math.round(stats.sigma));
     const hi = addDays(next, +Math.round(stats.sigma));
-    $("#nextRange").textContent = `bereik: ${fmt(lo)} – ${fmt(hi)}`;
+    $("#nextRange").textContent = `bereik: ${fmt(lo)} – ${fmt(hi)} (σ ≈ ${stats.sigma.toFixed(1)}d)`;
     const today = startOfDay(new Date());
     const du = daysBetween(today, next);
     $("#daysUntil").textContent = du >= 0 ? du : `${-du} geleden`;
-    $("#daysUntilSub").textContent = du >= 0 ? "dagen tot menstruatie" : "menstruatie is begonnen / overtijd";
+    $("#daysUntilSub").textContent = du >= 0 ? "dagen tot menstruatie" : "menstruatie overtijd";
   } else {
     $("#nextDate").textContent = "geen data";
     $("#nextRange").textContent = "";
   }
   $("#avgCycle").textContent = stats.mean ? stats.mean.toFixed(1) + " d" : "—";
-  $("#avgCycleSub").textContent = "σ " + stats.sigma.toFixed(2);
+  $("#avgCycleSub").textContent = "σ " + stats.sigma.toFixed(2) + "d · " + stats.lengths.length + " cycli";
 
   const today = startOfDay(new Date());
   const cd = cycleDayFor(today, stats);
-  const ph = phaseFor(cd);
+  const ph = phaseFor(cd, stats);
   $("#currentPhase").textContent = ph ? ph.label : "—";
   $("#phaseDay").textContent = cd ? `dag ${cd} van cyclus` : "";
 
-  // phase strip
+  // phase strip dynamic based on stats
   const strip = $("#phaseStrip");
   strip.innerHTML = "";
   const total = Math.round(stats.mean);
+  const luteal = Math.round(stats.lutealEstimate);
+  const ovulDay = total - luteal;
   const segs = [
-    { l: "menstruatie", from: 1, to: 5, c: "#ff4d6d" },
-    { l: "folliculair", from: 6, to: 11, c: "#8ad7ff" },
-    { l: "vruchtbaar", from: 12, to: 13, c: "#ffd166" },
-    { l: "ovulatie",   from: 14, to: 14, c: "#ffb703" },
-    { l: "vruchtbaar", from: 15, to: 16, c: "#ffd166" },
-    { l: "vroege luteaal", from: 17, to: 23, c: "#c89cff" },
-    { l: "late luteaal",   from: 24, to: total, c: "#a26bff" },
+    { l: "menstruatie 🩸", from: 1, to: 5, c: "#ff4d6d" },
+    { l: "folliculair 🔷", from: 6, to: ovulDay - 5, c: "#00d4ff" },
+    { l: "vruchtbaar 💧", from: ovulDay - 4, to: ovulDay - 1, c: "#ffd166" },
+    { l: "ovulatie ⚡", from: ovulDay, to: ovulDay, c: "#ffb703" },
+    { l: "vruchtbaar 💧", from: ovulDay + 1, to: ovulDay + 1, c: "#ffd166" },
+    { l: "luteaal 🔵", from: ovulDay + 2, to: total, c: "#2b7fff" },
   ];
   segs.forEach(s => {
     const w = ((Math.min(s.to,total) - s.from + 1) / total) * 100;
@@ -186,7 +204,7 @@ function renderOverview() {
     el.className = "phase-seg";
     el.style.flexBasis = w + "%";
     el.style.background = s.c;
-    el.textContent = w > 8 ? s.l : "";
+    el.textContent = w > 10 ? s.l : "";
     strip.appendChild(el);
   });
   if (cd) {
@@ -196,23 +214,38 @@ function renderOverview() {
     strip.appendChild(m);
   }
 
-  // upcoming phases table
+  // upcoming phases
   const tb = $("#phaseTable tbody");
   tb.innerHTML = "";
-  const upcoming = [
-    { label: "ovulatie",      day: 14 },
-    { label: "innesteling",   day: 17 },
-    { label: "vroege luteaal",day: 17 },
-    { label: "late luteaal",  day: 24 },
-    { label: "volgende menstruatie", day: total + 1 },
-  ];
   if (stats.lastStart) {
-    upcoming.forEach(p => {
+    const items = [
+      { label: "💧 vruchtbaar venster start", day: ovulDay - 4 },
+      { label: "⚡ ovulatie", day: ovulDay },
+      { label: "🔵 luteale fase start", day: ovulDay + 2 },
+      { label: "🩸 volgende menstruatie", day: total + 1 },
+    ];
+    items.forEach(p => {
       const dt = addDays(stats.lastStart, p.day - 1);
       const tr = document.createElement("tr");
       tr.innerHTML = `<td>${p.label}</td><td>${fmt(dt)}</td><td>dag ${p.day}</td>`;
       tb.appendChild(tr);
     });
+  }
+
+  // ovulation analysis text
+  const ov = $("#ovulationStats");
+  if (stats.mucusGaps.length) {
+    const gaps = stats.mucusGaps;
+    const meanGap = gaps.reduce((a,b)=>a+b,0)/gaps.length;
+    ov.innerHTML = `
+      Op basis van <strong>${gaps.length}</strong> waarneming(en) van heldere slijm:
+      <br>• gemiddeld <strong>${meanGap.toFixed(1)} dagen</strong> tussen slijm en volgende menstruatie (spreiding ${Math.min(...gaps)}–${Math.max(...gaps)}d)
+      <br>• geschatte <strong>luteale fase ≈ ${stats.lutealEstimate.toFixed(1)} dagen</strong> (σ ${stats.lutealSigma.toFixed(1)})
+      <br>• geschatte ovulatie rond cyclusdag <strong>${ovulDay}</strong> van ${total}
+      <br>• 💧 heldere slijm = einde folliculaire fase / start vruchtbaar venster — ovulatie volgt ~1-2 dagen later.
+    `;
+  } else {
+    ov.textContent = "Nog geen heldere-slijm data ingevoerd. Voeg waarnemingen toe in de dokter-tab om ovulatie te kalibreren.";
   }
 }
 
@@ -228,12 +261,12 @@ function renderCalendar() {
   grid.innerHTML = "";
 
   const first = new Date(y, m, 1);
-  // monday=0
   const offset = (first.getDay() + 6) % 7;
   const start = addDays(first, -offset);
   const today = startOfDay(new Date());
+  const mucusSet = new Set((DATA.mucus||[]).map(x => x.date));
+  const cycleSet = new Set(DATA.cycles.map(x => x.start));
 
-  // find max prob in window for normalization
   let maxP = 0;
   const win = [];
   for (let i = 0; i < 42; i++) {
@@ -245,31 +278,43 @@ function renderCalendar() {
 
   for (let i = 0; i < 42; i++) {
     const d = addDays(start, i);
+    const iso = toISO(d);
     const inMonth = d.getMonth() === m;
+    const isToday = d.getTime() === today.getTime();
     const cell = document.createElement("div");
-    cell.className = "cal-cell" + (inMonth ? "" : " muted") + (d.getTime() === today.getTime() ? " today" : "");
+    cell.className = "cal-cell" + (inMonth ? "" : " muted") + (isToday ? " today" : "");
 
     const cd = cycleDayFor(d, stats);
-    const ph = phaseFor(cd);
+    const ph = phaseFor(cd, stats);
     const p = win[i];
     const probNorm = maxP > 0 ? p / maxP : 0;
+    const isMens = cycleSet.has(iso);
+    const isMucus = mucusSet.has(iso);
 
-    // base phase tint
     if (ph) {
       const tint = document.createElement("div");
       tint.className = "ph";
       tint.style.background = ph.color;
-      tint.style.setProperty("--ph-a", ph.key === "menstruation" ? 0.55 : 0.18);
-      tint.style.opacity = ph.key === "menstruation" ? 0.55 : 0.18;
+      tint.style.opacity = ph.key === "menstruation" ? 0.5 : (ph.key === "ovulation" ? 0.45 : (ph.key === "fertile" ? 0.3 : 0.18));
       cell.appendChild(tint);
     }
-    // probability overlay (red for menstruation chance)
     if (probNorm > 0.15) {
       const ov = document.createElement("div");
       ov.className = "ph";
       ov.style.background = "radial-gradient(circle at 50% 60%, rgba(255,77,109,"+ (0.15 + probNorm*0.7).toFixed(2) +") 0%, transparent 70%)";
-      ov.style.opacity = 1;
       cell.appendChild(ov);
+    }
+    if (isMens) {
+      const m1 = document.createElement("div");
+      m1.className = "ph";
+      m1.style.background = "linear-gradient(135deg, rgba(255,77,109,.9), rgba(180,30,60,.7))";
+      cell.appendChild(m1);
+    }
+    if (isMucus) {
+      const m2 = document.createElement("div");
+      m2.className = "ph";
+      m2.style.background = "radial-gradient(circle at 50% 50%, rgba(90,240,255,.85) 0%, rgba(90,240,255,.2) 60%, transparent 80%)";
+      cell.appendChild(m2);
     }
 
     const day = document.createElement("div");
@@ -277,14 +322,33 @@ function renderCalendar() {
     day.textContent = d.getDate();
     cell.appendChild(day);
 
-    if (probNorm > 0.3) {
+    if (isMucus) {
+      const mk = document.createElement("div");
+      mk.className = "marker";
+      mk.textContent = "💧";
+      cell.appendChild(mk);
+    } else if (isMens) {
+      const mk = document.createElement("div");
+      mk.className = "marker";
+      mk.textContent = "🩸";
+      cell.appendChild(mk);
+    }
+
+    if (probNorm > 0.3 && !isMens) {
       const pct = document.createElement("div");
       pct.className = "pct";
       pct.textContent = Math.round(probNorm * 100) + "%";
       cell.appendChild(pct);
     }
 
-    cell.title = `${fmt(d)}${cd ? " · dag "+cd : ""}${ph ? " · "+ph.label : ""}${probNorm>0.05 ? " · kans "+(probNorm*100).toFixed(0)+"%" : ""}`;
+    const titleBits = [fmt(d)];
+    if (cd) titleBits.push("dag "+cd);
+    if (ph) titleBits.push(ph.label);
+    if (isMens) titleBits.push("🩸 menstruatie gemeten");
+    if (isMucus) titleBits.push("💧 heldere slijm gemeten");
+    if (probNorm > 0.05 && !isMens) titleBits.push("kans "+(probNorm*100).toFixed(0)+"%");
+    cell.title = titleBits.join(" · ");
+
     grid.appendChild(cell);
   }
 }
@@ -294,13 +358,13 @@ $("#calToday").addEventListener("click", ()=> { calCursor = new Date(); calCurso
 
 /* --- charts --- */
 let charts = {};
+const CHART_COLORS = { ink: "#e8f0fa", muted: "#7a93b0", grid: "#243a55" };
 function destroyCharts() { Object.values(charts).forEach(c => c?.destroy?.()); charts = {}; }
 function renderCharts() {
   destroyCharts();
   const stats = getStats();
   const cycles = stats.cycles;
 
-  // 1) line: cycle length over time
   const labels = [];
   const lens = [];
   for (let i = 1; i < cycles.length; i++) {
@@ -310,31 +374,29 @@ function renderCharts() {
   charts.len = new Chart($("#chartLen"), {
     type: "line",
     data: { labels, datasets: [
-      { label: "cyclus (dagen)", data: lens, borderColor: "#ff5d8f", backgroundColor: "rgba(255,93,143,.2)", tension: .3, fill: true, pointRadius: 5 },
-      { label: "gemiddelde", data: lens.map(()=>stats.mean), borderColor: "#c89cff", borderDash: [5,5], pointRadius: 0 }
+      { label: "cyclus (dagen)", data: lens, borderColor: "#2b7fff", backgroundColor: "rgba(43,127,255,.2)", tension: .3, fill: true, pointRadius: 5, pointBackgroundColor: "#4d9bff" },
+      { label: "gemiddelde", data: lens.map(()=>stats.mean), borderColor: "#00d4ff", borderDash: [5,5], pointRadius: 0 }
     ]},
-    options: { plugins: { legend: { labels: { color: "#f4e8ee" } } },
+    options: { plugins: { legend: { labels: { color: CHART_COLORS.ink } } },
       scales: {
-        x: { ticks: { color: "#b08aa0" }, grid: { color: "#4a2c3f" } },
-        y: { ticks: { color: "#b08aa0" }, grid: { color: "#4a2c3f" }, suggestedMin: 20, suggestedMax: 35 }
+        x: { ticks: { color: CHART_COLORS.muted }, grid: { color: CHART_COLORS.grid } },
+        y: { ticks: { color: CHART_COLORS.muted }, grid: { color: CHART_COLORS.grid }, suggestedMin: 20, suggestedMax: 35 }
       } }
   });
 
-  // 2) histogram
   const bins = {};
   lens.forEach(l => { bins[l] = (bins[l]||0)+1; });
   const bk = Object.keys(bins).sort((a,b)=>a-b);
   charts.hist = new Chart($("#chartHist"), {
     type: "bar",
-    data: { labels: bk, datasets: [{ label: "aantal", data: bk.map(k=>bins[k]), backgroundColor: "#ff5d8f" }] },
+    data: { labels: bk, datasets: [{ label: "aantal", data: bk.map(k=>bins[k]), backgroundColor: "#2b7fff", borderColor: "#4d9bff", borderWidth: 1 }] },
     options: { plugins: { legend: { display: false } },
       scales: {
-        x: { title: { display: true, text: "cycluslengte (dagen)", color: "#b08aa0" }, ticks: { color: "#b08aa0" }, grid: { color: "#4a2c3f" } },
-        y: { ticks: { color: "#b08aa0", stepSize: 1 }, grid: { color: "#4a2c3f" } }
+        x: { title: { display: true, text: "cycluslengte (dagen)", color: CHART_COLORS.muted }, ticks: { color: CHART_COLORS.muted }, grid: { color: CHART_COLORS.grid } },
+        y: { ticks: { color: CHART_COLORS.muted, stepSize: 1 }, grid: { color: CHART_COLORS.grid } }
       } }
   });
 
-  // 3) probability over next 60 days
   const probLabels = [], probData = [];
   const today = startOfDay(new Date());
   let maxP = 0;
@@ -353,15 +415,40 @@ function renderCharts() {
       label: "kans (genormaliseerd)",
       data: probData, borderColor: "#ff4d6d", backgroundColor: "rgba(255,77,109,.25)", fill: true, tension: .35, pointRadius: 0
     }]},
-    options: { plugins: { legend: { labels: { color: "#f4e8ee" } } },
+    options: { plugins: { legend: { labels: { color: CHART_COLORS.ink } } },
       scales: {
-        x: { ticks: { color: "#b08aa0", maxTicksLimit: 12 }, grid: { color: "#4a2c3f" } },
-        y: { ticks: { color: "#b08aa0", callback: v => v+"%" }, grid: { color: "#4a2c3f" }, min: 0, max: 100 }
+        x: { ticks: { color: CHART_COLORS.muted, maxTicksLimit: 12 }, grid: { color: CHART_COLORS.grid } },
+        y: { ticks: { color: CHART_COLORS.muted, callback: v => v+"%" }, grid: { color: CHART_COLORS.grid }, min: 0, max: 100 }
+      } }
+  });
+
+  // ovulation timing chart: bar of "days from mucus → next menstruation" per observation
+  const ovLabels = [];
+  const ovData = [];
+  const mucus = [...(DATA.mucus||[])].sort((a,b)=> a.date.localeCompare(b.date));
+  for (const mEntry of mucus) {
+    const md = parseISO(mEntry.date);
+    const nextCycle = stats.cycles.find(c => parseISO(c.start) > md);
+    if (nextCycle) {
+      ovLabels.push(fmt(md));
+      ovData.push(daysBetween(md, parseISO(nextCycle.start)));
+    }
+  }
+  charts.ovul = new Chart($("#chartOvul"), {
+    type: "bar",
+    data: { labels: ovLabels, datasets: [
+      { label: "dagen heldere slijm → menstruatie", data: ovData, backgroundColor: "#5af0ff", borderColor: "#00d4ff", borderWidth: 1 },
+      { label: "gemiddelde", data: ovData.map(()=> ovData.length ? ovData.reduce((a,b)=>a+b,0)/ovData.length : 0), type: "line", borderColor: "#ffb703", borderDash: [5,5], pointRadius: 0 }
+    ]},
+    options: { plugins: { legend: { labels: { color: CHART_COLORS.ink } } },
+      scales: {
+        x: { ticks: { color: CHART_COLORS.muted }, grid: { color: CHART_COLORS.grid } },
+        y: { title: { display: true, text: "dagen tot menstruatie", color: CHART_COLORS.muted }, ticks: { color: CHART_COLORS.muted }, grid: { color: CHART_COLORS.grid }, suggestedMin: 0, suggestedMax: 20 }
       } }
   });
 }
 
-/* --- doctor / data tabs --- */
+/* --- doctor tab --- */
 function renderCyclesTable() {
   const tb = $("#cyclesTable tbody");
   tb.innerHTML = "";
@@ -369,9 +456,28 @@ function renderCyclesTable() {
   cycles.forEach((c, idx) => {
     const prev = idx > 0 ? daysBetween(parseISO(cycles[idx-1].start), parseISO(c.start)) : "—";
     const tr = document.createElement("tr");
-    tr.innerHTML = `<td>${fmt(parseISO(c.start))}</td><td>${prev}${prev!=="—"?" d":""}</td><td>${c.note||""}</td><td><button class="row-del">verwijder</button></td>`;
+    tr.innerHTML = `<td>${fmt(parseISO(c.start))}</td><td>${prev}${prev!=="—"?" d":""}</td><td>${escapeHtml(c.note||"")}</td><td><button class="row-del">✕</button></td>`;
     tr.querySelector(".row-del").addEventListener("click", ()=> {
-      DATA.cycles = DATA.cycles.filter(x => !(x.start === c.start));
+      DATA.cycles = DATA.cycles.filter(x => x.start !== c.start);
+      persist(); render();
+    });
+    tb.appendChild(tr);
+  });
+}
+function renderMucusTable() {
+  const tb = $("#mucusTable tbody");
+  tb.innerHTML = "";
+  const stats = getStats();
+  const mucus = [...(DATA.mucus||[])].sort((a,b)=> a.date.localeCompare(b.date));
+  mucus.forEach(mItem => {
+    const md = parseISO(mItem.date);
+    // dag in cyclus: dagen sinds laatste cyclus-start vóór deze datum
+    const prevCycle = [...stats.cycles].reverse().find(c => parseISO(c.start) <= md);
+    const cd = prevCycle ? daysBetween(parseISO(prevCycle.start), md) + 1 : "—";
+    const tr = document.createElement("tr");
+    tr.innerHTML = `<td>${fmt(md)}</td><td>${cd !== "—" ? "dag "+cd : "—"}</td><td>${escapeHtml(mItem.note||"")}</td><td><button class="row-del">✕</button></td>`;
+    tr.querySelector(".row-del").addEventListener("click", ()=> {
+      DATA.mucus = DATA.mucus.filter(x => x.date !== mItem.date);
       persist(); render();
     });
     tb.appendChild(tr);
@@ -381,13 +487,13 @@ function renderDocList() {
   const ul = $("#docList");
   ul.innerHTML = "";
   const items = [...(DATA.doctorEntries||[])].sort((a,b)=> b.date.localeCompare(a.date));
-  items.forEach(e => {
+  items.forEach((e, idx) => {
     const li = document.createElement("li");
     li.innerHTML = `<div class="meta"><span>${fmt(parseISO(e.date))}</span><span class="tag-pill">${e.type}</span></div><div>${escapeHtml(e.text)}</div>`;
     ul.appendChild(li);
   });
 }
-function escapeHtml(s){ return s.replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#39;"}[c])); }
+function escapeHtml(s){ return (s||"").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#39;"}[c])); }
 
 $("#addCycleForm").addEventListener("submit", e => {
   e.preventDefault();
@@ -395,10 +501,24 @@ $("#addCycleForm").addEventListener("submit", e => {
   const note = $("#cycleNote").value;
   if (!date) return;
   if (!DATA.cycles.some(c => c.start === date)) {
-    DATA.cycles.push({ start: date, lengthFromPrev: null, note });
+    DATA.cycles.push({ start: date, note });
     persist(); render();
   }
   e.target.reset();
+  $("#cycleDate").value = toISO(new Date());
+});
+$("#addMucusForm").addEventListener("submit", e => {
+  e.preventDefault();
+  const date = $("#mucusDate").value;
+  const note = $("#mucusNote").value || "heldere slijm";
+  if (!date) return;
+  DATA.mucus = DATA.mucus || [];
+  if (!DATA.mucus.some(m => m.date === date)) {
+    DATA.mucus.push({ date, note });
+    persist(); render();
+  }
+  e.target.reset();
+  $("#mucusDate").value = toISO(new Date());
 });
 $("#docForm").addEventListener("submit", e => {
   e.preventDefault();
@@ -413,6 +533,7 @@ $("#docForm").addEventListener("submit", e => {
   DATA.doctorEntries.push(entry);
   persist(); render();
   e.target.reset();
+  $("#docDate").value = toISO(new Date());
 });
 
 $("#exportBtn").addEventListener("click", ()=> {
@@ -426,34 +547,34 @@ $("#importBtn").addEventListener("click", ()=> $("#importFile").click());
 $("#importFile").addEventListener("change", async e => {
   const f = e.target.files[0]; if (!f) return;
   const txt = await f.text();
-  try { DATA = JSON.parse(txt); persist(); render(); }
+  try { DATA = JSON.parse(txt); if (!DATA.mucus) DATA.mucus = []; persist(); render(); }
   catch { alert("ongeldige JSON"); }
 });
 $("#resetBtn").addEventListener("click", ()=> {
   if (confirm("Reset naar repo data.json? Lokale wijzigingen gaan verloren.")) {
     DATA = structuredClone(repoData);
+    if (!DATA.mucus) DATA.mucus = [];
     persist(); render();
   }
 });
 
 function renderDataPreview() { $("#dataPreview").textContent = JSON.stringify(DATA, null, 2); }
 
-/* --- master render --- */
 function render() {
   renderOverview();
   renderCalendar();
   renderCyclesTable();
+  renderMucusTable();
   renderDocList();
   renderDataPreview();
   if ($("#tab-charts").classList.contains("active")) renderCharts();
 }
 
-/* --- boot --- */
 (async function boot() {
   await loadInitial();
-  // pre-fill today in forms
   const today = toISO(new Date());
   $("#cycleDate").value = today;
+  $("#mucusDate").value = today;
   $("#docDate").value = today;
   tryUnlock();
 })();
