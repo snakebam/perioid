@@ -269,31 +269,6 @@ function renderOverview() {
     });
   }
 
-  // ovulation analysis text
-  const ov = $("#ovulationStats");
-  const allGaps = stats.mucusGaps;
-  const cleanGaps = stats.mucusGapsClean;
-  const outliers = stats.mucusEntries.filter(e => e.isOutlier);
-  if (allGaps.length) {
-    let html = `
-      Op basis van <strong>${cleanGaps.length}/${allGaps.length}</strong> betrouwbare slijm-waarneming(en) (outliers gefilterd):
-      <br>• <strong>mediaan ${stats.lutealMedian.toFixed(1)}d</strong> tussen slijm en volgende menstruatie (MAD ${stats.lutealSigma.toFixed(1)}d)
-      <br>• geschatte <strong>luteale fase ≈ ${stats.lutealEstimate.toFixed(1)} dagen</strong>
-      <br>• geschatte ovulatie rond cyclusdag <strong>${ovulDay}</strong> van ${total}
-      <br>• 💧 heldere slijm = einde folliculaire fase / start vruchtbaar venster — echte ovulatie volgt ~1-2 dagen later.
-    `;
-    if (outliers.length) {
-      html += `<br><br>⚠️ <strong>${outliers.length} atypische waarneming(en):</strong><ul style="margin:.3rem 0 0 1rem;padding:0">`;
-      outliers.forEach(o => {
-        html += `<li>${fmt(parseISO(o.date))} (gap ${o.gap}d) — ${o.reason}</li>`;
-      });
-      html += `</ul><span class="muted">Deze worden niet in het luteale gemiddelde meegenomen om de voorspelling stabiel te houden. Mogelijke verklaringen: anovulatoire estrogeen-doorbraak, dubbele follikel-recruitment, hormoonschommeling (T-therapie, stress, ziekte), of een niet-hormonale oorzaak (infectie, lubricant). Volg of de volgende menstruatie op de verwachte datum komt — als die ook vroeg/laat is, is het waarschijnlijk een echte cyclusverschuiving en moet de mediaan opnieuw geëvalueerd worden.</span>`;
-    }
-    html += `<br><br><span class="muted"><strong>Effect op menstruatie-voorspelling:</strong> verwaarloosbaar. De volgende-bloedings­datum wordt berekend uit menstruatie-tot-menstruatie intervallen, niet uit slijm. Slijm bepaalt alleen ovulatie-/fase-timing op de kalender.</span>`;
-    ov.innerHTML = html;
-  } else {
-    ov.textContent = "Nog geen heldere-slijm data ingevoerd. Voeg waarnemingen toe in de dokter-tab om ovulatie te kalibreren.";
-  }
 }
 
 /* --- calendar --- */
